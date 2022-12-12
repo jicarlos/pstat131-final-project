@@ -1,0 +1,16 @@
+name: 		The games name
+platform: 	Platform of the games release (i.e. PC,PS4, etc.)
+year: 		Year of the game's release
+genre: 		Genre of the game
+publisher: 	Publisher of the game
+na_sales: 	Sales in North America (in millions)
+eu_sales: 	Sales in Europe (in millions)
+jp_sales: 	Sales in Japan (in millions)
+other_sales: 	Sales in the rest of the world (in millions)
+global_sales: 	Total worldwide sales
+critic_score: 	Aggregate score compiled by Metacritic staff
+critic_count: 	The number of critics used in coming up with the `critic_score`
+user_score: 	Score by Metacritic's subscribers
+user_count: 	Number of users that rated the game for `user_score`
+developer: 	Party responsible for creating the game
+rating: 	The ESRB ratings (i.e. E, E10+, T, etc.)

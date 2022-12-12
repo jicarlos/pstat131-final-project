@@ -1,0 +1,762 @@
+---
+title: "PSTAT131-Final Project"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, warning=FALSE, message=FALSE}
+library(corrplot)   
+library(knitr)   
+library(MASS)    
+library(tidyverse)   
+library(tidymodels)
+library(kernlab) 
+library(ggplot2)   
+library(janitor)     
+library(randomForest)   
+library(dplyr)     
+library(yardstick) 
+tidymodels_prefer()
+
+set.seed(1234)
+```
+
+## Introduction
+
+The purpose of this project is to build a model that predicts the total sales of a video game.
+
+### Relevance
+
+This model could be useful because it can give producers of video games a general understanding of their estimated sales. It could tell them how well or poor a concept could sell and change their budget around their possible revenue. This could lead to some games having a budgets that better fits their sales and could help smaller creators with budgeting.
+
+### Loading Data
+
+```{r, message=FALSE}
+game_sales_old <- read_csv("data/project/video_game_sales.csv")
+```
+
+This project uses data from a web scrape of VGChartz Video Game Sales, and a web scrape from Metacritic. However, because Metacritic does not cover all games, there are a few observations that are missing in this data set. Despite this, there is originally 11563 observations and 16 variables. I was able to download this data set from [Kaggle](https://www.kaggle.com/datasets/sidtwr/videogames-sales-dataset?select=Video_Games_Sales_as_at_22_Dec_2016.csv).
+
+## Data Manipulation
+
+First, we will load in the data and clean their names.
+
+```{r, message=FALSE}
+game_sales <- game_sales_old %>%
+  clean_names()
+```
+
+This data set has a bunch of missing values for ratings. Just looking at the top 5 observation, there are already 3 rows with missing values. 
+
+```{r}
+game_sales %>%
+  head(5)
+```
+
+
+```{r class.source = 'fold-show'}
+sum(apply(game_sales, 1, anyNA))
+```
+If I were to find the total number of missing observations, I would see that there are almost 10000 observations with missing values which is more than half of the whole data set.
+
+```{r class.source = 'fold-show'}
+game_sales <- game_sales %>%
+  na.omit()
+
+dim(game_sales)
+
+game_sales %>%
+  head()
+```
+Getting rid of the all the observations with missing values, I am able to get a data set with just under 7000 observations which is more than enough for this analysis. 
+
+```{r class.source = 'fold-show'}
+game_sales <- game_sales %>%
+  select(-na_sales, -eu_sales, -jp_sales, -other_sales, -user_count, -critic_count)
+
+dim(game_sales)
+
+game_sales %>%
+  head()
+```
+I deselected a few variables because in this experiment I do not really care for the sales from other countries. I only care about the global sales or the overall sales so we can get rid of the more specific sales variables. I also got rid of `user_count` and `critic_count` because those variables are not relevant towards the global sales of a game.
+
+```{r class.source = 'fold-show'}
+game_sales <- game_sales %>%
+  mutate(platform = factor(platform),
+         year_of_release = factor(year_of_release),
+         genre = factor(genre),
+         publisher = factor(publisher),
+         developer = factor(developer),
+         rating = factor(rating))
+```
+
+I decide to factorize all the categorical values including `year_of_release` in order to make the recipe step much easier. `year_of_release` was turned into a factor because it was always a set number that does not really act as a numeric value instead just as a categorical one.
+
+## Exploratory Data Analysis
+
+I will do a correlation plot for all the numeric predictors, although there is only 3 of them, to see if there is any relationship between them.
+
+### Correlation Plot
+
+```{r}
+cor_game <- game_sales %>%
+  select(where(is.numeric)) %>%
+  cor()
+
+corrplot(cor_game)
+```
+
+While there does appear to be correlation between all the variables, it does not seem to be anything too major. It seems to be that `global_sales` has a bit of a positive correlation with the other two variables, but it is very minimal. It makes sense that there would be some relationship between `user_score` and `critic_score` considering that there would be some similarity between a critic's point of view of a game and the player. 
+
+### Distributions of Variables
+
+Lets see the distribution of the `global_sales` and the majority of the data lies.
+
+```{r}
+ggplot(game_sales, aes(global_sales)) +
+  geom_histogram(bins = 500)
+```
+
+It appears to be that the majority of games do not sale insanely well and most are usually closer to the lower end of the millions as opposed to being near the end which makes a lot of sense. It is easy to tell that the data is very left skewed. However, this graph does not really tell us much about the other points in the distribution. 
+
+Lets see if doing a box plot could give us a better understanding of where other points in the distribution lie.
+
+```{r}
+ggplot(game_sales, aes(global_sales)) +
+  geom_boxplot() +
+  xlab("Global Sales (in millions)")
+```
+
+Now, it much easier to see how the distribution is like where most of the data is around 1-0 million and there is a a fewer amount of data after that with one around 80.
+
+Now lets see how `global_sales` and the distribution between it and `platform`.
+
+```{r}
+ggplot(game_sales, aes(y = platform, x = global_sales)) +
+  geom_boxplot() + 
+  xlab("Global Sales (in millions)") + ylab("Platform") + 
+  ggtitle("Global Sales by Platform")
+```
+
+The box plots for each platform seem to be very similar to the each other with very slight difference depending mainly on the outliers. Two platforms, `PSV` and `DC` have a much smaller distribution where they do not have outliers that push pass 20.
+
+Now, we will do the same thing with `year_of_release` to see if the year that a game was released in had any affect on how well a game would sell.
+
+```{r}
+ggplot(game_sales, aes(y = year_of_release, x = global_sales)) +
+  geom_boxplot() + 
+  xlab("Global Sales (in millions)") + ylab("Year of Release") + 
+  ggtitle("Global Sales by Year of Release")
+```
+
+The same thing can be said here as with the plot above where the majority of the data is closer to the left with outliers pushing past that majority and approaching much higher number. However, in 1996-1999. The distribution is much larger and much few outliers in comparison to the rest of the data. 
+
+Next, I want to look at the relationship between genre and the total global sales.
+
+```{r}
+ggplot(game_sales, aes(y = genre, x = global_sales)) +
+  geom_boxplot() + 
+  xlab("Global Sales (in millions)") + ylab("Genre") + 
+  ggtitle("Global Sales by Genre")
+```
+
+This graph is really similar to the graphs that were looked at earlier, but there does seem to a relationship between the genre and global_sales. For some genres, there does seem to be quite a bit more outliers that tend to have higher sales than other genres so there should be a relationship between them.
+
+Next, I plan to look at how the critic and user ratings affect the total sales of a game. 
+
+```{r, message=FALSE}
+ggplot(game_sales, aes(y = critic_score, x = global_sales)) +
+  geom_point(alpha = 0.1) +
+  geom_smooth(method = "gam", se = FALSE, color = "red", linewidth = 1) +
+  xlab("Global Sales (in millions)") + ylab("Critic Score") + 
+  ggtitle("Global Sales by Critic Score")
+```
+
+```{r, message=FALSE}
+ggplot(game_sales, aes(y = user_score, x = global_sales)) +
+  geom_point(alpha = 0.1) +
+  geom_smooth(method = "gam", se = FALSE, color = "red", linewidth = 1) +
+  xlab("Global Sales (in millions)") + ylab("User Score") + 
+  ggtitle("Global Sales by User Score")
+```
+
+From both the `critic_score` and `user_score` graphs, we can see that there appears to be a positive relationship between those variables and `global_sales`. It is very noticeable when `0 < global_sales < 5` and loses this relationship when it comes to a few outliers that come after this interval. 
+
+Finally, I want to see the number of unique publisher and developer variables in order to understand how to manage my recipe later.  
+
+```{r}
+length(unique(game_sales$publisher))
+length(unique(game_sales$developer))
+```
+
+The length of `developer` and `publisher` are rather high so it would be a good idea to use `step_other` in order to keep these variables a bit tidier.
+
+Since there is quite a lot of different publishers and developers, I want to get the top 10 of both and see what the relationship between them and total sales would be.
+
+```{r}
+top_publisher <- data.frame(sort(table(game_sales$publisher), decreasing = TRUE)) %>%
+  head(10)
+
+game_sales_publisher <- game_sales %>%
+  filter(publisher %in% top_publisher$Var1)
+
+ggplot(game_sales_publisher, aes(y = publisher, x = global_sales)) +
+  geom_boxplot() + 
+  xlab("Global Sales (in millions)") + ylab("Publisher") + 
+  ggtitle("Global Sales by Publisher")
+```
+
+It appears to be that for the most part the publishers have a similar relationship with global_sales, but it does seem to be that Nintendo has a greater relationship with it having a larger box plot and a lot of outliers going further out.
+
+Now, I want to do the same thing with developer.
+
+```{r}
+top_developer <- data.frame(sort(table(game_sales$developer), decreasing = TRUE)) %>%
+  head(10)
+
+game_sales_developer <-  game_sales %>%
+  filter(developer %in% top_developer$Var1)
+
+ggplot(game_sales_developer, aes(y = developer, x = global_sales)) +
+  geom_boxplot() + 
+  xlab("Global Sales (in millions)") + ylab("Developer") + 
+  ggtitle("Global Sales by Developer")
+```
+
+Again, it is pretty similar to the other graphs, however, in this case, it appears to be that the developer Nintendo has a very large relationship with global_sales with a very large box plot in comparison to the other developers.
+
+## Model Building
+
+Because I had already manipulated the data earlier in the project, I do not have to do any of it anymore in this part and I can go straight into the model building.
+
+First, I will split the data into a training set and test set stratified on `global_sales`.
+
+### Training and Testing Split
+
+```{r, eval=FALSE }
+game_split <- initial_split(game_sales, strata = global_sales, prop = 0.70)
+game_train <- training(game_split)
+game_test  <- testing(game_split)
+```
+
+Next, I will create the recipe
+
+### Recipe
+
+```{r class.source = 'fold-show', eval=FALSE}
+game_recipe <- recipe(global_sales ~ platform + genre + year_of_release +
+                      publisher + critic_score + user_score + developer + rating, 
+                      data = game_sales) %>%
+  step_other(publisher, threshold = 100) %>%
+  step_other(developer, threshold = 100) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors()) %>%
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors())
+```
+
+From the EDA, I could see that the data was very heavily left-skewed so I decided to use 'step_center' and step_scale' to normalize the data. I also use `step_other` for `publisher` and `developer` because there we quite a number of different names for these variables so the function is used so that after 100 unique names the following names will be "other".
+
+Finally, I will fold the training data into 10 folds stratified on `global_sales`.
+
+### K-Fold Cross Validation
+
+```{r class.source = 'fold-show', eval=FALSE}
+game_folds <- vfold_cv(game_train, v = 10, strata = global_sales)
+```
+
+```{r, eval=FALSE}
+save(game_folds, game_recipe, game_train, game_test, 
+     file = "data/project/Game_Sales_Setup.rda")
+```
+
+I saved these variables in order to keep the same data throughout the project.
+
+## Models
+
+In this project, the models we will be running are **Linear Regression**, **Elastic Net**, **Random Forest**, **Boosted Tree**, **Support Vector Machine Polynomial**, and **Support Vector Machine Radial Basis Function**.
+
+Every model will go through a similar set up where each model will start off by having their engine and mode set. These models will all have their mode set to "regression" due to the response variable of the model begin numeric rather than categorical and each engine changing depending on the model used. Each model then has a workflow where the model and recipe is added.
+
+```{r}
+load(file = "data/project/Game_Sales_Setup.rda")
+load(file = "data/project/lm_fit.rda")
+load(file = "data/project/en_tune.rda")
+load(file = "data/project/boost_tune.rda")
+load(file = "data/project/rf_tune.rda")
+load(file = "data/project/svm_linear_tune.rda")
+load(file = "data/project/svm_rbf_tune.rda")
+```
+
+### Linear Regression
+
+First, I start off by using a basic linear regression model. There is no tuning data and the model is directly fit with the training data.
+
+```{r class.source = 'fold-show', warning=FALSE}
+lm_model <- linear_reg() %>% 
+  set_engine("lm") %>% 
+  set_mode("regression")
+
+lm_workflow <- workflow() %>% 
+  add_model(lm_model) %>% 
+  add_recipe(game_recipe)
+
+lm_fit <- fit(lm_workflow, game_train)
+
+save(lm_fit, lm_workflow, file = "data/project/lm_fit.rda")
+
+lm_rmse <- predict(lm_fit, new_data = game_train, type = "numeric") %>% 
+  bind_cols(game_train %>% select(global_sales)) %>%
+  rmse(truth = global_sales, estimate = .pred)
+```
+
+I save the model fit to save time and save the predicted rmse from this model by predicting new data and saving the rmse from that prediction. 
+
+### Elastic Net
+
+Here, I used the elastic net model which is a model that is sits at or between a ridge and lasso regression model. I tuned `mixture` and `penalty` and used the `glmnet` engine.
+
+```{r class.source = 'fold-show'}
+en_model <- linear_reg(mixture = tune(), penalty = tune()) %>%
+  set_mode("regression") %>%
+  set_engine("glmnet")
+
+en_workflow <- workflow() %>% 
+  add_recipe(game_recipe) %>% 
+  add_model(en_model)
+```
+
+I set up the tuning grid with `mixture` ranging from 0 to 1 to shift from a ridge and lasso regression model and the levels was set to 10.
+
+```{r class.source = 'fold-show'}
+en_params <- parameters(en_model) %>% 
+  update(penalty = penalty(range = c(-5, 5)), mixture = mixture(range = c(0, 1)))
+
+en_grid <- grid_regular(en_params, levels = 10)
+```
+
+Next, I ran the model using the tuning grid and fitted the model to `game_folds`. I saved the model to save time because the time it took for this to run was rather lengthy.
+
+```{r class.source = 'fold-show', eval=FALSE}
+en_tune <- tune_grid(en_workflow,
+                     resamples = game_folds, 
+                     grid = en_grid,
+                     control = control_grid(verbose = T))
+
+save(en_tune, en_workflow, file = "data/project/en_tune.rda")
+```
+
+Now, I will plot the tuned model and see how it affected the `rmse`. I will also find the best tuning parameters from this model and save the best performing one to use later.
+
+```{r class.source = 'fold-show'}
+autoplot(en_tune, metric = "rmse")
+```
+
+From this plot, it can be seen that going closer to a lasso regression was not helping the model and was increasing the `rmse`.
+
+```{r class.source = 'fold-show'}
+show_best(en_tune, metric = "rmse") 
+
+en_rmse <- show_best(en_tune, metric = "rmse") %>%
+  head(1) %>%
+  select(-.estimator, -.config)
+```
+
+Here, the best performing parameters for the `rmse` was one that had a `mean = 1.695666` using the parameters `penalty = 0.02154435` and `mixture = 0.2222222`.
+
+### Random Forest Model
+
+Now, it is time for the random forest model. Here, I tuned the parameters `min_n`, `mtry`, and `trees`, using the engine `ranger`.
+
+```{r class.source = 'fold-show'}
+rf_model <- rand_forest(min_n = tune(), mtry = tune(), 
+                        trees = tune(), mode = "regression") %>% 
+  set_engine("ranger")
+
+rf_workflow <- workflow() %>% 
+  add_model(rf_model) %>% 
+  add_recipe(game_recipe)
+```
+
+I tuned `mtry` to range from 1 to 8 because the model consisted of at maximum 8 predictor variables and set the levels to 10.
+
+```{r class.source = 'fold-show'}
+rf_params <- parameters(rf_model) %>% 
+  update(mtry = mtry(range= c(1, 8)))
+
+rf_grid <- grid_regular(rf_params, levels = 10)
+```
+
+Again, I ran the model using the tuning grid, fitted the model to `game_folds` and saved the model.
+
+```{r class.source = 'fold-show', eval=FALSE}
+rf_tune <- tune_grid(rf_workflow,
+                     resamples = game_folds, 
+                     grid = rf_grid,
+                     control = control_grid(verbose = T))
+
+save(rf_tune, rf_workflow, file = "data/project/rf_tune.rda")
+```
+
+I will plot this model and see how this model affect `rmse` and will save the best set of parameters. 
+
+```{r class.source = 'fold-show'}
+autoplot(rf_tune, metric = "rmse")
+```
+
+It appears to be that increasing the number of predictor variables had a very positive affect on the `rmse` causing the metric to decrease as the number of predictors increased.
+
+```{r class.source = 'fold-show'}
+show_best(rf_tune, metric = "rmse") 
+
+rf_rmse <- show_best(rf_tune, metric = "rmse") %>%
+  head(1) %>%
+  select(-.estimator, -.config)
+```
+
+Here, the best performing parameters for the `rmse` was one that had a `mean = 1.579691` using the parameters `mtry = 8`, `trees = 1777` and `min_n = 2`. This model so far has the smallest `mean` `rmse`.
+
+### Boosted Tree Model
+
+For this model, I tuned the same parameters as the random forest model. Those being `mtry`, `min_n`, and `trees.` I, also, set the engine to `xgboost`.
+
+```{r class.source = 'fold-show'}
+boost_model <- boost_tree(mtry = tune(), min_n = tune(), 
+                          trees = tune(), mode = "regression") %>% 
+  set_engine("xgboost")
+
+boost_workflow <- workflow() %>% 
+  add_model(boost_model) %>% 
+  add_recipe(game_recipe)
+```
+
+Again, I tuned the parameter `mtry` from 1 to 8 and I tuned `min_n` to range from 1 to 40 which should be the lowest and highest value of the parameter. I set `levels = 10`
+
+```{r class.source = 'fold-show'}
+boost_params <- parameters(boost_model) %>% 
+  update(mtry = mtry(range= c(1, 8)), min_n= min_n(range= c(1, 40)))
+
+boost_grid <- grid_regular(boost_params, levels = 10)
+```
+
+Again, I ran the model with the tuning grid, fit it to `game_folds` and saved it.
+
+```{r class.source = 'fold-show', eval=FALSE}
+boost_tune <- tune_grid(boost_workflow,
+                        resamples = game_folds, 
+                        grid = boost_grid,
+                        control = control_grid(verbose = T))
+
+save(boost_tune, boost_workflow, file = "data/project/boost_tune.rda")
+```
+
+I will plot this model to see how this model affect `rmse` and will save the best set of parameters. 
+
+```{r class.source = 'fold-show'}
+autoplot(boost_tune, metric = "rmse")
+```
+
+It appears to be that after a certain `trees` value the `rmse` increases dramatically. It, also, looks as if one of the higher values of `min_n` has a better affect on the `rmse` than the lower values. 
+
+```{r class.source = 'fold-show'}
+show_best(boost_tune, metric = "rmse")
+
+boost_rmse <- show_best(boost_tune, metric = "rmse") %>%
+  head(1) %>%
+  select(-.estimator, -.config)
+```
+
+Here, the best performing parameters for the `rmse` was one that had a `mean = 1.604906` using the parameters `mtry = 2`, `trees = 445` and `min_n = 35`. This model was not better than the random forest model.
+
+### SVM Polynomial
+
+In this model, I tuned `degree`, and `cost` and set the engine to `kernlab`.
+
+Ignore the fact that the model is called `svm_linear_model`. Originally, I was going to run a linear model and a polynomial one, but realized that by tuning `degree`, the model would also do a linear model when `degree = 1` so having a dedicated linear model was unnecessary.
+
+```{r class.source = 'fold-show'}
+svm_linear_model <- svm_poly(degree = tune(), cost = tune()) %>%
+  set_mode("regression") %>%
+  set_engine("kernlab", scaled = FALSE)
+
+svm_linear_workflow <- workflow() %>% 
+  add_model(svm_linear_model) %>% 
+  add_recipe(game_recipe)
+```
+
+I will not set any dedicated ranges to either parameter and will only be doing 5 levels because of computing power. Even at 5 levels, the tuning took about 6.5 hours to complete with each fold taking about 40 minutes each.
+
+```{r class.source = 'fold-show'}
+svm_linear_params <- parameters(svm_linear_model)
+
+svm_linear_grid <- grid_regular(svm_linear_params, levels = 5)
+```
+
+Again, I ran the model with the tuning grid, fit it to `game_folds` and saved it.
+
+```{r class.source = 'fold-show', eval=FALSE}
+svm_linear_tune <- tune_grid(svm_linear_workflow,
+                        resamples = game_folds, 
+                        grid = svm_linear_grid,
+                        control = control_grid(verbose = T))
+
+save(svm_linear_tune, svm_linear_workflow, 
+     file = "data/project/svm_linear_tune.rda")
+```
+
+I will plot this model to see how this model affect `rmse` and will save the best set of parameters. 
+
+```{r class.source = 'fold-show'}
+autoplot(svm_linear_tune, metric = "rmse")
+```
+
+It seems to be that when `degree = 2` it had performed the best for `rmse` and as `cost` increases `rmse` also seems to be increasing so one of the lower `cost` values was the best performing one.
+
+```{r class.source = 'fold-show'}
+show_best(svm_linear_tune, metric = "rmse")
+
+svm_linear_rmse <- show_best(svm_linear_tune, metric = "rmse") %>%
+  head(1) %>%
+  select(-.estimator, -.config)
+```
+
+Here, the best performing parameters for the `rmse` was one that had a `mean = 1.703705` using the parameters `cost = 9.765625e-04` and `degree = 2`. This model was not better than the best performing one.
+
+### SVM Radial Basis Function
+
+For this final model, I only tuned `cost` and set the engine to `kernlab`, again.
+
+```{r class.source = 'fold-show'}
+svm_rbf_model <- svm_rbf(cost = tune()) %>%
+  set_mode("regression") %>%
+  set_engine("kernlab")
+
+svm_rbf_workflow <- workflow() %>% 
+  add_model(svm_rbf_model) %>% 
+  add_recipe(game_recipe)
+```
+
+I will not set any dedicated ranges to `cost` and will set `levels = 10`
+
+```{r class.source = 'fold-show'}
+svm_rbf_grid <- grid_regular(cost(), levels = 10)
+```
+
+Again, I ran the model with the tuning grid, fit it to `game_folds` and saved it.
+
+```{r class.source = 'fold-show', eval=FALSE}
+svm_rbf_tune <- tune_grid(svm_rbf_workflow,
+                          resamples = game_folds, 
+                          grid = svm_rbf_grid,
+                          control = control_grid(verbose = T))
+
+save(svm_rbf_tune, svm_rbf_workflow, file = "data/project/svm_rbf_tune.rda")
+```
+
+I will plot this model to see how this model affect `rmse` and will save the best set of parameters. 
+
+```{r class.source = 'fold-show'}
+autoplot(svm_rbf_tune, metric = "rmse")
+```
+
+It looks like as `cost` increases `rmse` also decreases until a certain point where `rmse` increase with `cost`.
+
+```{r class.source = 'fold-show'}
+show_best(svm_rbf_tune, metric = "rmse")
+
+svm_rbf_rmse <- show_best(svm_rbf_tune, metric = "rmse") %>%
+  head(1) %>%
+  select(-.estimator, -.config)
+```
+
+Here, the best performing parameters for the `rmse` was one that had a `mean = 1.657626` using the parameters `cost = 10.0793684`. This model was not better than the best performing one.
+
+## Results
+
+### Results of All Models
+
+In order to compare all the models to each other, I will place all the best performing parameters of each model to a tibble where their `rmse` will be compared to each other model with the lowest one being the best model. To do this, I get the `rmse` and names of all the models, put them in a tibble and sort the rows by ascending order by `rmse`.
+
+```{r class.source = 'fold-show'}
+game_rmses <- c(lm_rmse$.estimate,
+                en_rmse$mean,
+                rf_rmse$mean,
+                boost_rmse$mean,
+                svm_linear_rmse$mean,
+                svm_rbf_rmse$mean)
+
+game_names <- c("Linear Regression",
+                "Elastic Net",
+                "Random Forest",
+                "Boosted Tree",
+                "SVM Polynomial",
+                "SVM Radial Basis")
+
+game_results <- tibble(Model = game_names, RMSE = game_rmses) %>%
+  arrange(game_rmses)
+game_results
+
+rf_rmse
+```
+
+The best model is the one with the lowest `rmse` which in this case is the random forest model. 
+
+Earlier, we got the best configuration of the random forest model and the best model was the one where `mtry = 8`, `trees = 1777`, and `min_n = 2`. 
+
+### Results From the Best Model
+
+I finalize the workflow that using the best model and the best parameters from that model.
+
+```{r class.source = 'fold-show'}
+rf_tuned <- finalize_workflow(rf_workflow, select_best(rf_tune, metric = "rmse"))
+```
+
+I fit the workflow to the training data and save it because it did take a little bit of time.
+
+```{r class.source = 'fold-show', eval=FALSE}
+rf_final <- fit(rf_tuned, data = game_train)
+
+save(rf_final, file = "data/project/final.rda")
+```
+
+Now, I applied the fitted data to the testing data and stored it to a final data set. 
+
+```{r class.source = 'fold-show'}
+load("data/project/final.rda")
+
+test_predictions_final <- augment(rf_final, new_data = game_test) %>%
+  select(global_sales, ".pred") 
+  
+test_predictions_final %>%
+  rmse(truth = global_sales, estimate = .pred)
+```
+
+The model returned a `rmse = 1.357467` for the testing data which is quite smaller than the training data `rmse = 1.579691`. 
+
+To visualize how well the model did, I used a scatterplot of the predicted values and the true values and plotted them against each other with a diagonal line to see whether they fit well on it.
+
+```{r}
+ggplot(test_predictions_final, aes(x = global_sales, y = .pred)) +
+  geom_point() +
+  geom_abline(lty = 2) +
+  xlab("Global Sales (in millions)") + ylab("Predicted Global Sales") +
+  ggtitle("Predicted vs. Real")
+```
+
+It appears to be that, while most of the observations land on or close to the line, there are quite a few points that lie outside of this line with some being really far off.
+
+### Testing the Model
+
+#### Pokemon Diamond / Pokemon Pearl
+
+One of the missing observations in this data set is the game **Pokemon Diamond/Pokemon Pearl** because of the missing critic and user score. If I use scores from an updated [Metacritic review](https://www.metacritic.com/game/ds/pokemon-diamond-version), `critic_score = 85` and `user_score = 8.2`. 
+
+I can use this data to create a dataframe that contains the appropriate data for this game and estimate the `global_sales`.
+
+```{r class.source = 'fold-show'}
+pokemon_dp <- data.frame(
+  name = "Pokemon Diamond/Pokemon Pearl",
+  platform = "DS",
+  year_of_release = "2006",
+  genre = "Role-Playing",
+  publisher = "Nintendo",
+  critic_score = 85,
+  user_score = 8.2,
+  developer = "Game Freak",
+  rating = "E"
+) %>%
+  mutate(platform = factor(platform),
+         year_of_release = factor(year_of_release),
+         genre = factor(genre),
+         publisher = factor(publisher),
+         developer = factor(developer),
+         rating = factor(rating))
+
+predict(rf_final, pokemon_dp)
+
+game_sales_old$Global_Sales[game_sales_old$Name == 
+                              "Pokemon Diamond/Pokemon Pearl"][1]
+```
+
+For this game, our model predicts the game would have sold 5.499437 million copies when it actually sold 18.25 million being off by around 13 million. Not great, unfortunately.
+
+#### Rabbids Invasion: The Interactive TV Show
+
+If I do the same thing earlier to a game with a much smaller actual `global_sales`, maybe it would do a bit better. Therefore, I tried the game **Rabbids Invasion: The Interactive TV Show** and found the [Metacritic scores](https://www.metacritic.com/game/xbox-one/rabbids-invasion),`critic_score = 53` and `user_score = 6.3`.
+
+```{r class.source = 'fold-show'}
+rabbids <- data.frame(
+  name = "Rabbids Invasion: The Interactive TV Show",
+  platform = "XOne",
+  year_of_release = "2014",
+  genre = "Misc",
+  publisher = "Ubisoft",
+  critic_score = 53,
+  user_score = 6.3,
+  developer = "Ubisoft",
+  rating = "E10+"
+) %>%
+  mutate(platform = factor(platform),
+         year_of_release = factor(year_of_release),
+         genre = factor(genre),
+         publisher = factor(publisher),
+         developer = factor(developer),
+         rating = factor(rating))
+
+predict(rf_final, rabbids)
+
+game_sales_old$Global_Sales[game_sales_old$Name == 
+                              "Rabbids Invasion: The Interactive TV Show"][4]
+```
+
+For this game, our model predicts the game would have sold 0.5335735 million copies when it actually sold 0.01 million being off by around 0.52 million. Still, not amazing, but definitely better.
+
+#### Persona 5
+
+Lets do the same thing, again, but this time with a moderate `global_sales`. So, I tried the game **Persona 5** and found the [Metacritic scores](https://www.metacritic.com/game/playstation-4/persona-5),`critic_score = 97` and `user_score = 8.7`.
+
+```{r class.source = 'fold-show'}
+persona_5 <- data.frame(
+  name = "Persona 5",
+  platform = "PS4",
+  year_of_release = "2016",
+  genre = "Role-Playing",
+  publisher = "Atlus",
+  critic_score = 93,
+  user_score = 8.7,
+  developer = "Atlus",
+  rating = "E"
+) %>%
+  mutate(platform = factor(platform),
+         year_of_release = factor(year_of_release),
+         genre = factor(genre),
+         publisher = factor(publisher),
+         developer = factor(developer),
+         rating = factor(rating))
+
+predict(rf_final, persona_5)
+
+game_sales_old$Global_Sales[game_sales_old$Name == 
+                              "Persona 5"][2]
+```
+
+For this game, our model predicts the game would have sold 1.198118 million copies when it actually sold 0.37 million being off by around 0.83 million. This was worse than the lower end prediction, but still better than the higher end one.
+
+## Conclusion
+
+After conducting this experiment, it has become clear that this data is not capable enough to accurately predict the total sales of any video game. 
+
+Although it was able to predict the sales in some capacity, there is something missing to really make the model accurate. Some variable or multiple variables is necessary to really depict how popular a game is such as popularity or maybe funding in advertising. By having a variable like this, it would be able to get a better understanding of how much more a game can sell solely based on the hype that is put upon a title.
+
+In this project, I used a variety of different models in order to find a model that best fits the data I had. This ended up being the random forest model using all the covariates. While the model was able to predict the sales relatively well, there still was quite a bit of inaccuracy and it is probably due to it needing a bit more variables to really be accurate. It is possible that the boosted tree model would have worked better if I had tuned by learning rate, but I had gone against it because of the computing power necessary to run it. It took a bit over an hour for 1 fold so I decided to not do it. 
+
+Overall, this Video Game Sales project provided a basic way to find the number of games sold from a given title with a fairly average accuracy and built my foundational understanding of machine learning models and techniques.
